@@ -1,5 +1,8 @@
-<<<<<<< HEAD
-# YouTube Study Assistant
+# **🧙‍♂️ MentorIA**
+**_Mentoria is just getting started — powerful tools are on the way. Stay tuned!_*
+
+# V1.0.0
+## YouTube Study Assistant
 
 A tool that helps you extract YouTube video transcripts and generate study materials like summaries, key points, and practice questions using AI.
 
