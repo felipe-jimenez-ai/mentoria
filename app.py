@@ -48,27 +48,95 @@ def clean_latex(text):
     return text
 
 def format_qa(text):
-    """Format Q&A text with proper spacing and line breaks"""
-    # Split into Q&A pairs
-    qa_pairs = []
-    current_q = None
+    """Format Q&A text with better readability"""
+    if not text or not isinstance(text, str):
+        return "No questions and answers available."
     
-    # Split by 'Pregunta ' to separate each Q&A
-    parts = text.split('Pregunta ')
+    # Clean up the text first
+    text = ' '.join(text.split())  # Normalize whitespace
     
-    for part in parts[1:]:  # Skip first empty part
-        if 'Respuesta:' in part:
-            q_num, rest = part.split(':', 1)
-            q, a = rest.split('Respuesta:', 1)
-            qa_pairs.append((f'Pregunta {q_num}:{q}', a.strip()))
+    # Handle the specific format with numbered questions
+    if "Pregunta " in text and ("?" in text or "Respuesta:" in text):
+        return format_numbered_qa(text)
     
-    # Format each Q&A pair with proper spacing
-    formatted_lines = []
-    for q, a in qa_pairs:
-        formatted_lines.append(f'**{q}**')
-        formatted_lines.append(f'{a}\n')
+    # Try different splitting methods
+    if '\n\n' in text:
+        qa_pairs = [qa.strip() for qa in text.split('\n\n') if qa.strip()]
+    else:
+        qa_pairs = [text]
     
-    return '\n'.join(formatted_lines)
+    formatted = []
+    for qa in qa_pairs:
+        # Try different answer indicators
+        answer_indicators = ['Answer:', 'Respuesta:', 'A:', 'R:']
+        split_success = False
+        
+        for indicator in answer_indicators:
+            if indicator in qa:
+                parts = qa.split(indicator, 1)
+                if len(parts) == 2:
+                    question = parts[0].strip()
+                    answer = parts[1].strip()
+                    # Clean up any remaining markdown in the answer
+                    answer = answer.replace('**', '').strip()
+                    if not question.endswith('?'):
+                        question += '?'
+                    formatted.append(f"**Q:** {question}\n**A:** {answer}\n")
+                    split_success = True
+                    break
+        
+        if not split_success and '?' in qa:
+            parts = qa.split('?', 1)
+            if len(parts) == 2:
+                question = parts[0].strip() + '?'
+                answer = parts[1].strip()
+                answer = answer.replace('**', '').strip()
+                formatted.append(f"**Q:** {question}\n**A:** {answer}\n")
+                split_success = True
+        
+        if not split_success and qa.strip():
+            formatted.append(f"{qa}\n")
+    
+    if not formatted:
+        return "No questions and answers could be generated from the content."
+        
+    return '\n'.join(formatted)
+
+def format_numbered_qa(text):
+    """Format numbered Q&A text (e.g., Pregunta 1:, Pregunta 2:)"""
+    import re
+    
+    # Split by question number pattern
+    questions = re.split(r'(Pregunta \d+:|\*\*Pregunta \d+\*\*)', text)[1:]
+    formatted = []
+    
+    # Process questions and answers in pairs
+    for i in range(0, len(questions), 2):
+        if i + 1 >= len(questions):
+            break
+            
+        q_num = questions[i].strip(': ').replace('**', '').strip()
+        content = questions[i+1].strip()
+        
+        # Split into question and answer
+        if '?' in content:
+            q_part, a_part = content.split('?', 1)
+            question = q_part.strip() + '?'
+            answer = a_part.strip()
+            
+            # Clean up answer (remove any remaining markdown or extra spaces)
+            answer = re.sub(r'\*\*|\*', '', answer).strip()
+            
+            # Look for Respuesta: in the answer part
+            if 'Respuesta:' in answer:
+                answer = answer.split('Respuesta:', 1)[-1].strip()
+            
+            formatted.append(f"**{q_num}**\n**Q:** {question}\n**A:** {answer}\n")
+        else:
+            # If no question mark, just add as is
+            formatted.append(f"**{q_num}**\n{content}\n")
+    
+    return '\n'.join(formatted)
 
 def format_bullet_points(text):
     """Format text with bullet points or Q&A with proper spacing and line breaks"""
