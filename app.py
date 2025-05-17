@@ -327,9 +327,31 @@ def main():
         format_func=lambda x: "Spanish" if x == "es" else "English"
     )
     
-    url = st.text_input("YouTube Video URL:")
+    # Create a form to handle both Enter key and button press
+    with st.form("youtube_form"):
+        st.markdown("<div style='margin-bottom: 6px;'>Paste YouTube Video URL:</div>", unsafe_allow_html=True)
+        
+        # Main row with input and button
+        input_col, button_col = st.columns([5, 1])
+        with input_col:
+            # Add some custom CSS to align the input field
+            st.markdown("""
+                <style>
+                    div[data-testid="stTextInput"] {
+                        margin-bottom: 0;
+                    }
+                </style>
+            """, unsafe_allow_html=True)
+            url = st.text_input("Enter YouTube URL", 
+                             key="url_input", 
+                             label_visibility="collapsed")
+        with button_col:
+            # Add custom styling to the button container
+            st.markdown("<div style='display: flex; align-items: flex-start; height: 100%; padding-top: 0rem;'>", unsafe_allow_html=True)
+            submit_button = st.form_submit_button("Enter", type="primary", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
     
-    if url:
+    if (url and submit_button) or (url and not st.session_state.get('url_input_processed', False)):
         video_id = extract_video_id(url)
         st.video(f"https://www.youtube.com/watch?v={video_id}")
         
