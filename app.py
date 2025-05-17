@@ -314,7 +314,7 @@ def main():
     
     # Header with centered text
     st.markdown("<h1 style='text-align: center;'>🧙‍♂️ MentorIA Suite</h1>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align: center; color: #6c757d; margin-top: -1rem; margin-bottom: 2rem; font-style: italic;'>Wait for more tools!</div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; color: #6c757d; margin-top: -1rem; margin-bottom: 2rem; font-style: italic;'>Mentoria is just getting started — powerful tools are on the way. Stay tuned!</div>", unsafe_allow_html=True)
     
     st.title("🎓 YouTube Study Assistant")
     
@@ -430,10 +430,8 @@ def main():
 def footer():
     st.markdown("""
     <div style='text-align: center; margin-top: 4rem; padding: 1.5rem 0; border-top: 1px solid #e0e0e0; color: #6c757d; font-size: 0.9rem;'>
-        <div>Made with ❤️ in Colombia by <strong>Andrés Felipe Jiménez Pérez</strong></div>
-        <div style='margin-bottom: 0.5rem;'>
-            <a href='https://www.linkedin.com/in/felipejimenezperez/' target='_blank' style='color: #4a6cf7; text-decoration: none;'>LinkedIn</a>
-        </div>
+        <div>Made with ❤️ in Colombia by <strong>AZ Tech</strong> | <a href='https://aztechnologies.web.app/' target='_blank' style='color: #4a6cf7; text-decoration: none;'>Website</a></div>
+        <div><strong>Eng. Andrés Felipe Jiménez Pérez</strong> | <a href='https://www.linkedin.com/in/felipejimenezperez/' target='_blank' style='color: #4a6cf7; text-decoration: none;'>LinkedIn</a></div>
         <div>© 2025 AZ Tech. All rights reserved.</div>
     </div>
     """, unsafe_allow_html=True)
