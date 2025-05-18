@@ -1,35 +1,94 @@
 import os
+import re
+import hashlib
+from functools import lru_cache
+from typing import Optional, List, Dict, Any, Union, Tuple
+
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi
-from groq import Groq
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
+from groq import Groq, GroqError
 from dotenv import load_dotenv
 
-def extract_video_id(url):
-    """Extract video ID from YouTube URL"""
-    if 'youtube.com' in url:
-        return url.split('v=')[1].split('&')[0]
-    elif 'youtu.be' in url:
-        return url.split('/')[-1]
-    return url
+def is_valid_youtube_url(url: str) -> bool:
+    """Check if the URL is a valid YouTube URL"""
+    youtube_patterns = [
+        r'^https?://(www\.)?youtube\.com/watch\?v=([^&]+)',
+        r'^https?://youtu\.be/([^?]+)',
+        r'^https?://(www\.)?youtube\.com/shorts/([^?]+)',
+    ]
+    return any(re.match(pattern, url) for pattern in youtube_patterns)
 
-def get_transcript(video_id, language='es'):
-    """Fetch transcript for a given YouTube video ID in the specified language"""
+def extract_video_id(url: str) -> Optional[str]:
+    """Extract video ID from YouTube URL"""
+    try:
+        if not url or not isinstance(url, str):
+            return None
+            
+        url = url.strip()
+        
+        # Handle youtu.be links
+        if 'youtu.be' in url:
+            return url.split('/')[-1].split('?')[0]
+            
+        # Handle youtube.com links
+        if 'youtube.com' in url:
+            # Handle different YouTube URL formats
+            if 'v=' in url:
+                return url.split('v=')[1].split('&')[0]
+            elif '/live/' in url:  # For live streams
+                return url.split('/live/')[-1].split('?')[0]
+                
+        return None
+    except Exception:
+        return None
+
+@lru_cache(maxsize=32)
+def get_transcript(video_id: str, language: str = 'es') -> str:
+    """
+    Fetch and cache transcript for a given YouTube video ID in the specified language.
+    
+    Args:
+        video_id: YouTube video ID
+        language: Desired language code (default: 'es' for Spanish)
+        
+    Returns:
+        str: The transcript text or an error message
+    """
+    if not video_id:
+        return "Error: No video ID provided"
+        
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
         # Try to get transcript in the specified language
         try:
             transcript = transcript_list.find_transcript([language])
-        except:
-            # If specified language not found, try to get any available transcript
-            transcript = next(iter(transcript_list), None)
-            if transcript:
-                transcript = transcript.translate('es').fetch()
-                return " ".join([entry['text'] for entry in transcript])
-            
-        transcript = transcript.fetch()
-        return " ".join([entry['text'] for entry in transcript])
+        except NoTranscriptFound:
+            # If specified language not found, try to get any available transcript and translate
+            try:
+                transcript = transcript_list.find_transcript(['en'])  # Try English as fallback
+                transcript = transcript.translate(language).fetch()
+            except Exception as e:
+                # If no English, get the first available transcript
+                transcript = next(iter(transcript_list), None)
+                if transcript:
+                    transcript = transcript.translate(language).fetch()
+                else:
+                    return "Error: No transcript available for this video"
         
+        # If we have a transcript object, fetch its contents
+        if hasattr(transcript, 'fetch'):
+            transcript = transcript.fetch()
+            
+        # Join all text entries with spaces
+        return " ".join(entry['text'] for entry in transcript)
+        
+    except VideoUnavailable:
+        return "Error: This video is not available or is private"
+    except TranscriptsDisabled:
+        return "Error: Transcripts are disabled for this video"
+    except NoTranscriptFound:
+        return "Error: No transcript available for this video"
     except Exception as e:
         return f"Error fetching transcript: {str(e)}"
 
@@ -47,127 +106,375 @@ def clean_latex(text):
         text = text.replace(cmd, '')
     return text
 
-def format_qa(text):
-    """Format Q&A text with better readability"""
+def format_qa(text, language='en'):
+    """Format Q&A text with better readability
+    
+    Args:
+        text (str): The text to format
+        language (str): 'en' for English, 'es' for Spanish
+    """
     if not text or not isinstance(text, str):
         return "No questions and answers available."
     
-    # Clean up the text first
-    text = ' '.join(text.split())  # Normalize whitespace
+    # Clean up the text first - normalize spaces but preserve structure
+    text = re.sub(r'\s+', ' ', text).strip()
     
-    # Handle the specific format with numbered questions
-    if "Pregunta " in text and ("?" in text or "Respuesta:" in text):
-        return format_numbered_qa(text)
+    # Remove any leading/trailing ** or other markdown artifacts
+    text = re.sub(r'^[\*\s]+', '', text)
+    text = re.sub(r'[\*\s]+$', '', text)
     
-    # Try different splitting methods
-    if '\n\n' in text:
-        qa_pairs = [qa.strip() for qa in text.split('\n\n') if qa.strip()]
-    else:
-        qa_pairs = [text]
+    # Handle the specific Spanish format with "Pregunta X: ... Respuesta: ..."
+    if language == 'es' and ("Pregunta" in text or "pregunta" in text):
+        return format_spanish_qa(text)
     
+    # Handle the specific format with Q1: Question X: ... A: Answer: ...
+    if language == 'en' and re.search(r'Q\d+:', text) and 'Question \d+:' in text and 'A: Answer:' in text:
+        # Extract all Q&A pairs
+        qa_pairs = re.findall(r'(Q\d+:.*?)(?=Q\d+:|$)', text, re.DOTALL)
+        formatted = []
+        
+        for i, qa in enumerate(qa_pairs, 1):
+            # Clean up the question and answer
+            qa = re.sub(r'Question \d+:', '', qa)  # Remove duplicate question number
+            if 'A: Answer:' in qa:
+                q, a = qa.split('A: Answer:', 1)
+                q = q.replace('Q\d+:', '').strip()
+                q = re.sub(r'^[:\.\s]+', '', q).strip()
+                if not q.endswith('?'):
+                    q = q.rstrip('.:') + '?'
+                a = a.strip()
+                formatted.append(f"**Q{i}:** {q}\n**A:** {a}\n")
+        
+        if formatted:
+            return '\n'.join(formatted)
+    
+    # Handle the specific format with numbered questions in English
+    if language == 'en':
+        # Check for patterns like "Q1:", "Question 1:", or numbered lists
+        if (re.search(r'(Q\d*:|Question \d+:|\d+\.)', text, re.IGNORECASE)):
+            return format_numbered_qa(text, language)
+        
+        # Handle the case where the model returns a list of questions and answers
+        # with "Question X:" and "Answer:" patterns
+        if "Question" in text and "Answer:" in text:
+            return format_numbered_qa(text, language)
+        
+        # Handle the case where the model returns a simple Q&A format
+        if "Q:" in text and "A:" in text:
+            return format_numbered_qa(text, language)
+    
+    # If we get here and it's English but no specific format was detected,
+    # try to format it as a numbered Q&A anyway
+    if language == 'en':
+        return format_numbered_qa(text, language)
+    
+    # Default case for other languages or formats
+    return text
+    
+    # Handle the case where we have Q: and A: patterns
+    if re.search(r'Q\s*\d*\s*:', text, re.IGNORECASE) and re.search(r'A\s*\d*\s*:', text, re.IGNORECASE):
+        return format_numbered_qa(text, language)
+    
+    # Try to handle as a simple Q&A format
     formatted = []
-    for qa in qa_pairs:
-        # Try different answer indicators
-        answer_indicators = ['Answer:', 'Respuesta:', 'A:', 'R:']
-        split_success = False
-        
-        for indicator in answer_indicators:
-            if indicator in qa:
-                parts = qa.split(indicator, 1)
-                if len(parts) == 2:
-                    question = parts[0].strip()
-                    answer = parts[1].strip()
-                    # Clean up any remaining markdown in the answer
-                    answer = answer.replace('**', '').strip()
+    
+    # Try to split by question patterns (Q1, Q2, etc.)
+    q_pattern = r'(Q\d*\s*:)' if language == 'en' else r'(Pregunta \d+\s*:)'
+    parts = re.split(q_pattern, text, flags=re.IGNORECASE)
+    
+    if len(parts) > 1:  # If we found question patterns
+        # The first part is typically an intro, add it as is if not empty
+        if parts[0].strip():
+            formatted.append(parts[0].strip() + '\n')
+            
+        # Process Q&A pairs
+        for i in range(1, len(parts), 2):
+            if i + 1 >= len(parts):
+                break
+                
+            q_num = parts[i].strip().rstrip(':')
+            content = parts[i+1].strip()
+            
+            # Split into question and answer
+            answer_indicators = ['A:'] if language == 'en' else ['A:', 'Respuesta:']
+            answer_found = False
+            
+            for indicator in answer_indicators:
+                if indicator in content:
+                    q_part, a_part = content.split(indicator, 1)
+                    question = q_part.strip()
+                    answer = a_part.strip()
+                    
+                    # Clean up the question
                     if not question.endswith('?'):
-                        question += '?'
-                    formatted.append(f"**Q:** {question}\n**A:** {answer}\n")
-                    split_success = True
+                        # Find the last period that's likely the end of the question
+                        last_period = question.rfind('.')
+                        if last_period > 0 and len(question) - last_period < 50:  # Heuristic
+                            question = question[:last_period] + '?' + question[last_period+1:]
+                        else:
+                            question = question.rstrip('.:') + '?'
+                    
+                    # Clean up the answer
+                    answer = re.sub(r'\s+', ' ', answer)  # Normalize spaces
+                    # Remove any remaining Q: or A: at start of answer
+                    answer = re.sub(r'^[QA]\d*\s*:?\s*', '', answer, flags=re.IGNORECASE).strip()
+                    # Remove any markdown bold/asterisks
+                    answer = re.sub(r'\*+', '', answer).strip()
+                    
+                    # Format with consistent numbering
+                    q_num_clean = re.sub(r'[^\d]', '', q_num) or str(len(formatted) + 1)
+                    formatted.append(f"**Q{q_num_clean}:** {question}\n**A:** {answer}\n")
+                    answer_found = True
                     break
-        
-        if not split_success and '?' in qa:
-            parts = qa.split('?', 1)
-            if len(parts) == 2:
-                question = parts[0].strip() + '?'
-                answer = parts[1].strip()
-                answer = answer.replace('**', '').strip()
-                formatted.append(f"**Q:** {question}\n**A:** {answer}\n")
-                split_success = True
-        
-        if not split_success and qa.strip():
-            formatted.append(f"{qa}\n")
+            
+            # If no answer indicator found, try to split by question mark
+            if not answer_found and '?' in content:
+                q_part, a_part = content.split('?', 1)
+                question = q_part.strip() + '?'
+                answer = a_part.strip()
+                # Clean up the answer
+                answer = re.sub(r'^[QA]\d*\s*:?\s*', '', answer, flags=re.IGNORECASE).strip()
+                answer = re.sub(r'\*+', '', answer).strip()
+                q_num_clean = re.sub(r'[^\d]', '', q_num) or str(len(formatted) + 1)
+                formatted.append(f"**Q{q_num_clean}:** {question}\n**A:** {answer}\n")
+            elif not answer_found and content.strip():
+                # If we can't find a question mark or answer, just add as is
+                q_num_clean = re.sub(r'[^\d]', '', q_num) or str(len(formatted) + 1)
+                formatted.append(f"**Q{q_num_clean}:** {content.strip()}\n")
+    
+    if not formatted:
+        return "No se pudieron generar preguntas y respuestas a partir del contenido." if language == 'es' else "No questions and answers could be generated from the content."
     
     if not formatted:
         return "No questions and answers could be generated from the content."
         
     return '\n'.join(formatted)
 
-def format_numbered_qa(text):
-    """Format numbered Q&A text (e.g., Pregunta 1:, Pregunta 2:)"""
-    import re
-    
-    # Split by question number pattern
-    questions = re.split(r'(Pregunta \d+:|\*\*Pregunta \d+\*\*)', text)[1:]
+def format_spanish_qa(text):
+    """Format Spanish Q&A text in the specific format:
+    "Pregunta X: [question]? Respuesta: [answer] Pregunta Y: ..."
+    """
+    # Split by 'Pregunta X:' pattern
+    parts = re.split(r'(Pregunta \d+:)', text)
     formatted = []
     
-    # Process questions and answers in pairs
-    for i in range(0, len(questions), 2):
-        if i + 1 >= len(questions):
+    # The first part is usually an intro or empty
+    if parts and parts[0].strip():
+        formatted.append(parts[0].strip() + '\n')
+    
+    # Process Q&A pairs
+    for i in range(1, len(parts), 2):
+        if i + 1 >= len(parts):
             break
             
-        q_num = questions[i].strip(': ').replace('**', '').strip()
-        content = questions[i+1].strip()
+        q_num = parts[i].strip()
+        content = parts[i+1].strip()
         
-        # Split into question and answer
-        if '?' in content:
+        # Look for answer indicators
+        answer_indicators = ['Respuesta:', 'A:']
+        answer_found = False
+        
+        for indicator in answer_indicators:
+            if indicator in content:
+                q_part, a_part = content.split(indicator, 1)
+                question = q_part.strip()
+                answer = a_part.strip()
+                
+                # Handle case where question mark might be missing
+                if '?' not in question:
+                    # Find the last period that's likely the end of the question
+                    last_period = question.rfind('.')
+                    if last_period > 0 and len(question) - last_period < 50:  # Heuristic
+                        question = question[:last_period] + '?' + question[last_period+1:]
+                    else:
+                        question = question.rstrip('.:') + '?'
+                
+                # Clean up the answer
+                answer = re.sub(r'\s+', ' ', answer)  # Normalize spaces
+                # Remove any remaining Pregunta at the start of answer
+                answer = re.sub(r'^Pregunta \d+:', '', answer).strip()
+                
+                formatted.append(f"**{q_num}**\n**Q:** {question}\n**A:** {answer}\n")
+                answer_found = True
+                break
+        
+        # If no answer indicator found, try to split by question mark
+        if not answer_found and '?' in content:
             q_part, a_part = content.split('?', 1)
             question = q_part.strip() + '?'
             answer = a_part.strip()
-            
-            # Clean up answer (remove any remaining markdown or extra spaces)
-            answer = re.sub(r'\*\*|\*', '', answer).strip()
-            
-            # Look for Respuesta: in the answer part
-            if 'Respuesta:' in answer:
-                answer = answer.split('Respuesta:', 1)[-1].strip()
-            
+            # Remove any remaining Pregunta at the start of answer
+            answer = re.sub(r'^Pregunta \d+:', '', answer).strip()
             formatted.append(f"**{q_num}**\n**Q:** {question}\n**A:** {answer}\n")
-        else:
-            # If no question mark, just add as is
-            formatted.append(f"**{q_num}**\n{content}\n")
+        elif not answer_found:
+            # If we can't find a question mark or answer, just add as is
+            formatted.append(f"**{q_num}** {content}\n")
     
     return '\n'.join(formatted)
 
-def format_bullet_points(text):
-    """Format text with bullet points or Q&A with proper spacing and line breaks"""
-    # Check if this is a Q&A format
-    if 'Pregunta' in text and 'Respuesta:' in text:
-        return format_qa(text)
-        
-    # Otherwise, handle as bullet points
-    parts = text.split('•')
+def format_numbered_qa(text, language='en'):
+    """Format numbered Q&A text with consistent formatting
     
-    # Process each part
-    formatted_parts = []
-    for i, part in enumerate(parts):
-        part = part.strip()
-        if not part:
+    Args:
+        text (str): The text to format
+        language (str): 'en' for English, 'es' for Spanish
+    """
+    import re
+    
+    # Clean up the text first
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Remove any leading/trailing ** or other markdown artifacts
+    text = re.sub(r'^[\*\s]+', '', text)
+    text = re.sub(r'[\*\s]+$', '', text)
+    
+    # Handle Spanish Q&A format
+    if language == 'es':
+        return format_spanish_qa(text)
+    
+    # Initialize formatted output list
+    formatted = []
+    
+    # First, handle the specific format from the example
+    if 'Here are the' in text and 'most important combined questions and answers' in text:
+        # Extract the main content after the introduction
+        content = re.sub(r'^.*?Here are the \d+ most important combined questions and answers.*?:', '', text, flags=re.IGNORECASE)
+        
+        # Split by question markers (Question X: or QX:)
+        questions = re.split(r'(?:Question \d+:|Q\d+:)\s*', content, flags=re.IGNORECASE)
+        
+        # The first part is usually empty or an intro, skip it
+        for i, question_text in enumerate(questions[1:], 1):
+            # Split into question and answer parts
+            if 'Answer:' in question_text:
+                q_part, a_part = question_text.split('Answer:', 1)
+                question = q_part.strip()
+                answer = a_part.strip()
+                
+                # Clean up question
+                question = re.sub(r'^[\d\.\s]+', '', question).strip()
+                if not question.endswith('?'):
+                    question = question.rstrip('.:') + '?'
+                
+                # Clean up answer
+                answer = re.sub(r'^[\d\.\s]+', '', answer).strip()
+                answer = re.sub(r'\s+', ' ', answer)
+                
+                formatted.append(f"**Q{i}:** {question}\n**A:** {answer}\n")
+        
+        if formatted:
+            return '\n'.join(formatted)
+    
+    # If the specific format wasn't found, try the general patterns
+    qa_pairs = re.findall(r'(?:Q\s*\d*\s*:|Question\s+\d+\s*:)(.*?)(?=Q\s*\d*\s*:|Question\s+\d+\s*:|A\s*\d*\s*:|Answer\s+\d+\s*:|$)', 
+                        text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # If we found Q: patterns, try to match them with A: patterns
+    if qa_pairs:
+        # Find all answers (A: patterns)
+        a_parts = re.findall(r'(?:A\s*\d*\s*:|Answer\s+\d+\s*:)(.*?)(?=Q\s*\d*\s*:|Question\s+\d+\s*:|A\s*\d*\s*:|Answer\s+\d+\s*:|$)', 
+                          text, flags=re.IGNORECASE | re.DOTALL)
+        
+        # If we have matching numbers of Qs and As, pair them up
+        if qa_pairs and a_parts and len(qa_pairs) == len(a_parts):
+            for i, (q, a) in enumerate(zip(qa_pairs, a_parts), 1):
+                question = q.strip()
+                answer = a.strip()
+                
+                # Clean up the question
+                if not question.endswith('?'):
+                    question = question.rstrip('.:') + '?'
+                
+                # Clean up the answer
+                answer = re.sub(r'\s+', ' ', answer).strip()
+                answer = re.sub(r'^[QA]\d*\s*:?\s*', '', answer, flags=re.IGNORECASE).strip()
+                answer = re.sub(r'\*+', '', answer).strip()
+                
+                formatted.append(f"**Q{i}:** {question}\n**A:** {answer}\n")
+    
+    # If we didn't find explicit Q: A: pairs, try to split by numbered items
+    if not formatted:
+        # Look for patterns like "1. Question? Answer"
+        items = re.split(r'(\d+\.\s*)', text)
+        if len(items) > 1:
+            for i in range(1, len(items), 2):
+                if i + 1 < len(items):
+                    content = items[i] + items[i+1]
+                else:
+                    content = items[i]
+                
+                # Try to split into question and answer
+                if '?' in content:
+                    q_part, a_part = content.split('?', 1)
+                    question = q_part.strip() + '?'
+                    answer = a_part.strip()
+                    
+                    # Clean up the answer
+                    answer = re.sub(r'^[\*\s]+', '', answer)
+                    answer = re.sub(r'\s+', ' ', answer).strip()
+                    
+                    formatted.append(f"**Q{len(formatted) + 1}:** {question}\n**A:** {answer}\n")
+    
+    # If we still don't have any formatted content, try to split by double newlines
+    if not formatted:
+        blocks = [b.strip() for b in text.split('\n\n') if b.strip()]
+        for i, block in enumerate(blocks, 1):
+            if '?' in block:
+                q_part, a_part = block.split('?', 1)
+                question = q_part.strip() + '?'
+                answer = a_part.strip()
+                formatted.append(f"**Q{i}:** {question}\n**A:** {answer}\n")
+    
+    # If we still don't have any formatted content, return the original text with minimal formatting
+    if not formatted:
+        # Try to add some basic formatting to the original text
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for i, line in enumerate(lines, 1):
+            if '?' in line:
+                q_part, a_part = line.split('?', 1)
+                question = q_part.strip() + '?'
+                answer = a_part.strip()
+                formatted.append(f"**Q{i}:** {question}\n**A:** {answer}\n")
+            else:
+                formatted.append(f"{line}\n")
+    
+    return '\n'.join(formatted)
+
+def format_bullet_points(text, language='en'):
+    """Format text with bullet points or Q&A with proper spacing and line breaks
+    
+    Args:
+        text (str): The text to format
+        language (str): 'en' for English, 'es' for Spanish
+    """
+    # Check if this is a Q&A format
+    if '?' in text and (
+        ('Answer:' in text or 'Respuesta:' in text or 
+         'A:' in text or 'R:' in text or
+         'Q:' in text or 'Pregunta:' in text)
+    ):
+        return format_qa(text, language)
+    
+    # Otherwise, format as bullet points
+    lines = text.split('\n')
+    formatted_lines = []
+    
+    bullet_char = '•'  # Default bullet point
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
             continue
             
-        # Add bullet point (except for the first part if it doesn't start with a bullet)
-        if i > 0 or text.strip().startswith('•'):
-            formatted_parts.append(f'• {part}')
+        # Check for different bullet point formats
+        if re.match(r'^\d+[\.\)]', line):  # Numbered lists: 1., 2), etc.
+            formatted_lines.append(f"{bullet_char} {line}")
+        elif re.match(r'^[•*-]', line):  # Already has a bullet point
+            formatted_lines.append(f"{bullet_char} {line[1:].strip()}")
         else:
-            formatted_parts.append(part)
+            formatted_lines.append(f"{bullet_char} {line}")
     
-    # Join with double line breaks between bullet points
-    formatted_text = '\n\n'.join(formatted_parts)
-    
-    # Clean up any triple line breaks
-    while '\n\n\n' in formatted_text:
-        formatted_text = formatted_text.replace('\n\n\n', '\n\n')
-    
-    return formatted_text.strip()
+    return '\n'.join(formatted_lines)
 
 def detect_language(text):
     """Detect the language of the text (simplified version)"""
@@ -200,12 +507,24 @@ def get_language_instructions(lang):
             ),
             'questions': (
                 'Genera 5 preguntas importantes y sus respuestas basadas en esta transcripción.\n'
-                'Formato requerido (usa exactamente este formato para cada pregunta y respuesta):\n\n'
-                'Pregunta 1: [Tu pregunta aquí]\n'
-                'Respuesta: [Tu respuesta aquí]\n\n'
-                'Pregunta 2: [Tu pregunta aquí]\n'
-                'Respuesta: [Tu respuesta aquí]\n\n'
-                'Y así sucesivamente. Asegúrate de que cada pregunta y respuesta estén en líneas separadas y haya una línea en blanco entre cada par pregunta-respuesta.'
+                'IMPORTANTE: Sigue EXACTAMENTE este formato, incluyendo los números de línea y saltos de línea:\n\n'
+                'Pregunta 1: [Escribe aquí la primera pregunta terminando con signo de interrogación]\n'
+                'Respuesta: [Escribe aquí la respuesta a la primera pregunta]\n\n'
+                'Pregunta 2: [Escribe aquí la segunda pregunta terminando con signo de interrogación]\n'
+                'Respuesta: [Escribe aquí la respuesta a la segunda pregunta]\n\n'
+                'Pregunta 3: [Escribe aquí la tercera pregunta terminando con signo de interrogación]\n'
+                'Respuesta: [Escribe aquí la respuesta a la tercera pregunta]\n\n'
+                'Pregunta 4: [Escribe aquí la cuarta pregunta terminando con signo de interrogación]\n'
+                'Respuesta: [Escribe aquí la respuesta a la cuarta pregunta]\n\n'
+                'Pregunta 5: [Escribe aquí la quinta pregunta terminando con signo de interrogación]\n'
+                'Respuesta: [Escribe aquí la respuesta a la quinta pregunta]\n\n'
+                'REGLAS ESTRICTAS:\n'
+                '1. Usa EXACTAMENTE el formato mostrado arriba\n'
+                '2. No incluyas ningún otro texto fuera de este formato\n'
+                '3. Asegúrate de que cada pregunta termine con "?"\n'
+                '4. No incluyas prefijos como "1." o "a)" en las respuestas\n'
+                '5. Mantén cada pregunta y respuesta en una sola línea\n'
+                '6. Incluye exactamente una línea en blanco entre cada par pregunta-respuesta'
             ),
             'key_points': (
                 'Extrae los 5 puntos clave más importantes de esta transcripción.\n'
@@ -234,12 +553,24 @@ def get_language_instructions(lang):
             ),
             'questions': (
                 'Generate 5 important questions and answers based on this transcript.\n'
-                'Required format (use exactly this format for each Q&A pair):\n\n'
-                'Question 1: [Your question here]\n'
-                'Answer: [Your answer here]\n\n'
-                'Question 2: [Your question here]\n'
-                'Answer: [Your answer here]\n\n'
-                'And so on. Make sure each question and answer are on separate lines and there is a blank line between each Q&A pair.'
+                'IMPORTANT: Follow EXACTLY this format, including line numbers and line breaks:\n\n'
+                'Question 1: [Type your first question ending with a question mark]\n'
+                'Answer: [Type the answer to the first question]\n\n'
+                'Question 2: [Type your second question ending with a question mark]\n'
+                'Answer: [Type the answer to the second question]\n\n'
+                'Question 3: [Type your third question ending with a question mark]\n'
+                'Answer: [Type the answer to the third question]\n\n'
+                'Question 4: [Type your fourth question ending with a question mark]\n'
+                'Answer: [Type the answer to the fourth question]\n\n'
+                'Question 5: [Type your fifth question ending with a question mark]\n'
+                'Answer: [Type the answer to the fifth question]\n\n'
+                'STRICT RULES:\n'
+                '1. Use EXACTLY the format shown above\n'
+                '2. Do not include any other text outside this format\n'
+                '3. Make sure each question ends with "?"\n'
+                '4. Do not include prefixes like "1." or "a)" in the answers\n'
+                '5. Keep each question and answer on a single line\n'
+                '6. Include exactly one blank line between each Q&A pair'
             ),
             'key_points': (
                 'Extract the 5 most important key points from this transcript.\n'
@@ -333,44 +664,64 @@ def combine_results(results, material_type, lang):
     
     return clean_latex(response.choices[0].message.content)
 
-def generate_study_material(transcript, material_type="summary"):
-    """Generate study materials using Groq in the same language as the transcript"""
-    if not transcript or not transcript.strip():
-        return "Error: Empty transcript"
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache results for 1 hour
+def generate_study_material(transcript: str, material_type: str = "summary", language: str = 'en') -> str:
+    """
+    Generate study materials using Groq API with error handling and caching.
+    
+    Args:
+        transcript: The transcript text to process
+        material_type: Type of material to generate (summary, qa, etc.)
+        language: Language code for the output
         
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    
-    # Detect the language of the transcript
-    lang = detect_language(transcript)
-    
-    if material_type not in ['summary', 'questions', 'key_points']:
-        return "Invalid material type"
-    
+    Returns:
+        str: Generated content or error message
+    """
+    if not transcript or not isinstance(transcript, str):
+        return "Error: No transcript provided"
+        
+    if not material_type or not isinstance(material_type, str):
+        return "Error: Invalid material type"
+        
     try:
-        # Split the transcript into chunks
-        chunks = split_into_chunks(transcript)
+        # Get the Groq API key from environment variables
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return "Error: GROQ_API_KEY not found in environment variables"
+            
+        client = Groq(api_key=api_key)
         
-        if len(chunks) > 1:
-            # Process each chunk separately
+        # Check if the transcript is too long and needs to be split
+        if len(transcript) > 4000:
+            # Split the transcript into chunks
+            chunks = split_into_chunks(transcript)
+            
+            if not chunks:
+                return "Error: Unable to split transcript into chunks"
+                
+            # Process each chunk
             results = []
-            progress_bar = st.progress(0)
+            progress_bar = st.progress(0.0)
+            
             for i, chunk in enumerate(chunks):
-                progress_bar.progress((i + 1) / len(chunks), f"Processing part {i + 1} of {len(chunks)}")
-                result = process_chunk(client, chunk, material_type, lang)
-                results.append(result)
+                progress = float(i) / len(chunks)
+                progress_bar.progress(progress, f"Processing part {i+1} of {len(chunks)}...")
+                
+                result = process_chunk(client, chunk, material_type, language)
+                if result:
+                    results.append(result)
             
             # Combine the results
             progress_bar.progress(1.0, "Combining results...")
-            final_result = combine_results(results, material_type, lang)
+            final_result = combine_results(results, material_type, language)
             progress_bar.empty()
             return final_result
         else:
             # Process as a single chunk
-            return process_chunk(client, transcript, material_type, lang)
+            return process_chunk(client, transcript, material_type, language)
             
-        
-    except Exception as e:
-        return f"Error generating content: {str(e)}"
+    except GroqError as e:
+        return f"Groq API Error: {str(e)}"
     except Exception as e:
         return f"Error generating content: {str(e)}"
 
@@ -472,7 +823,7 @@ def main():
         # Generate or retrieve the selected material
         if st.button(f"Generate {selected_display}"):
             with st.spinner(f"Generating {selected_display.lower()}..."):
-                material = generate_study_material(st.session_state.transcript, material_type)
+                material = generate_study_material(st.session_state.transcript, material_type, language)
                 # Store the generated material in session state
                 st.session_state.generated_materials[material_type] = material
         
@@ -484,29 +835,11 @@ def main():
             if material_type == 'summary':
                 formatted_content = material
             elif material_type == 'key_points':
-                formatted_content = format_bullet_points(material)
+                formatted_content = format_bullet_points(material, language)
             else:  # questions
-                formatted_content = format_qa(material)
+                formatted_content = format_qa(material, language)
             
-            # Add emoji based on material type
-            emoji_map = {
-                'summary': '📝',
-                'key_points': '🔑',
-                'questions': '❓'
-            }
-            
-            # Get the appropriate title
-            titles = {
-                'summary': 'Summary',
-                'key_points': 'Key Points',
-                'questions': 'Questions & Answers'
-            }
-            
-            title = titles.get(material_type, material_type.capitalize())
-            emoji = emoji_map.get(material_type, '📄')
-            
-            # Display the formatted content with appropriate title and emoji
-            st.subheader(f"{emoji} {title}")
+            # Display the formatted content
             st.markdown(formatted_content)
             
             # Add copy button
