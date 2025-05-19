@@ -1,8 +1,7 @@
 import os
 import re
-import hashlib
 from functools import lru_cache
-from typing import Optional, List, Dict, Any, Union, Tuple
+from typing import Optional
 
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
@@ -56,7 +55,25 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
     """
     if not video_id:
         return "Error: No video ID provided"
-        
+    
+    # Try different methods to get the transcript
+    methods = [
+        _get_transcript_direct,  # Try direct API first
+        _get_transcript_with_retry,  # Then try with retries
+    ]
+    
+    for method in methods:
+        try:
+            result = method(video_id, language)
+            if result and not result.startswith("Error:"):
+                return result
+        except Exception as e:
+            continue
+    
+    return "Error: Could not retrieve transcript after multiple attempts"
+
+def _get_transcript_direct(video_id: str, language: str) -> str:
+    """Try to get transcript using YouTubeTranscriptApi directly"""
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
@@ -68,7 +85,7 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
             try:
                 transcript = transcript_list.find_transcript(['en'])  # Try English as fallback
                 transcript = transcript.translate(language).fetch()
-            except Exception as e:
+            except Exception:
                 # If no English, get the first available transcript
                 transcript = next(iter(transcript_list), None)
                 if transcript:
@@ -90,7 +107,44 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
     except NoTranscriptFound:
         return "Error: No transcript available for this video"
     except Exception as e:
-        return f"Error fetching transcript: {str(e)}"
+        raise Exception(f"Direct method failed: {str(e)}")
+
+def _get_transcript_with_retry(video_id: str, language: str, max_retries: int = 3) -> str:
+    """Try to get transcript with retries and different approaches"""
+    import time
+    from pytube import YouTube
+    
+    for attempt in range(max_retries):
+        try:
+            # Try direct method first
+            if attempt == 0:
+                return _get_transcript_direct(video_id, language)
+                
+            # Try with pytube as fallback
+            yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
+            captions = yt.captions
+            
+            # Try to get the caption in the requested language
+            caption = captions.get_by_language_code(language[:2])  # Try first 2 chars of language code
+            
+            # If not found, try English
+            if not caption and language != 'en':
+                caption = captions.get_by_language_code('en')
+                
+            if caption:
+                return caption.generate_srt_captions()
+                
+            # If no captions found, try to get the first available caption
+            if captions:
+                return next(iter(captions)).generate_srt_captions()
+                
+        except Exception as e:
+            if attempt == max_retries - 1:  # Last attempt
+                raise Exception(f"All retry attempts failed: {str(e)}")
+            time.sleep(1)  # Wait before retrying
+            continue
+    
+    return "Error: Could not retrieve transcript with any method"
 
 def clean_latex(text):
     """Remove LaTeX formatting from text"""
