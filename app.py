@@ -56,49 +56,87 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
     if not video_id:
         return "Error: No video ID provided"
     
+    # Debug: Print which video we're trying to fetch
+    st.sidebar.info(f"Fetching transcript for video ID: {video_id}")
+    
     # Try different methods to get the transcript
     methods = [
-        _get_transcript_direct,  # Try direct API first
-        _get_transcript_with_retry,  # Then try with retries
+        ("Direct API", _get_transcript_direct),
+        ("With Retry", _get_transcript_with_retry),
     ]
     
-    for method in methods:
+    last_error = None
+    for method_name, method in methods:
         try:
+            st.sidebar.info(f"Trying method: {method_name}")
             result = method(video_id, language)
             if result and not result.startswith("Error:"):
+                st.sidebar.success(f"Success with method: {method_name}")
                 return result
+            last_error = result  # Store the error message
         except Exception as e:
+            st.sidebar.error(f"Method {method_name} failed: {str(e)}")
+            last_error = str(e)
             continue
     
-    return "Error: Could not retrieve transcript after multiple attempts"
+    error_msg = f"Error: Could not retrieve transcript after multiple attempts. Last error: {last_error}"
+    st.sidebar.error(error_msg)
+    return error_msg
 
 def _get_transcript_direct(video_id: str, language: str) -> str:
     """Try to get transcript using YouTubeTranscriptApi directly"""
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        st.sidebar.info("Attempting to list available transcripts...")
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        except Exception as e:
+            return f"Error listing transcripts: {str(e)}"
+        
+        st.sidebar.info(f"Available languages: {[t.language_code for t in transcript_list]}")
         
         # Try to get transcript in the specified language
         try:
+            st.sidebar.info(f"Looking for transcript in language: {language}")
             transcript = transcript_list.find_transcript([language])
+            st.sidebar.info(f"Found transcript in language: {transcript.language_code}")
         except NoTranscriptFound:
-            # If specified language not found, try to get any available transcript and translate
+            st.sidebar.warning(f"No transcript found in {language}, trying English...")
             try:
+                # If specified language not found, try to get any available transcript and translate
                 transcript = transcript_list.find_transcript(['en'])  # Try English as fallback
+                st.sidebar.info("Found English transcript, translating...")
                 transcript = transcript.translate(language).fetch()
-            except Exception:
+            except Exception as e:
+                st.sidebar.warning(f"No English transcript found, trying first available: {str(e)}")
                 # If no English, get the first available transcript
-                transcript = next(iter(transcript_list), None)
-                if transcript:
-                    transcript = transcript.translate(language).fetch()
-                else:
-                    return "Error: No transcript available for this video"
+                try:
+                    transcript = next(iter(transcript_list), None)
+                    if transcript:
+                        st.sidebar.info(f"Translating from {transcript.language_code} to {language}")
+                        transcript = transcript.translate(language).fetch()
+                    else:
+                        return "Error: No transcript available for this video"
+                except Exception as trans_e:
+                    return f"Error in translation: {str(trans_e)}"
         
         # If we have a transcript object, fetch its contents
         if hasattr(transcript, 'fetch'):
-            transcript = transcript.fetch()
+            try:
+                transcript = transcript.fetch()
+            except Exception as e:
+                return f"Error fetching transcript: {str(e)}"
+            
+        if not transcript:
+            return "Error: No transcript content available"
             
         # Join all text entries with spaces
         return " ".join(entry['text'] for entry in transcript)
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        st.sidebar.error(f"Unexpected error in _get_transcript_direct: {error_details}")
+        return f"Unexpected error: {str(e)}"
         
     except VideoUnavailable:
         return "Error: This video is not available or is private"
