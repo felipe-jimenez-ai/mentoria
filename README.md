@@ -3,7 +3,7 @@ _Accelerate your learning efficiency!_
 _Mentoria is just getting started — powerful tools are on the way. Stay tuned!_
 V1.0.0
 
-https://github.com/user-attachments/assets/8d070110-4db9-40e5-83ab-8d59dd3359ae
+https://github.com/user-attachments/assets/14694b99-7fe9-44ef-a1bf-9cd89a7a8d77
 
 ## YouTube Study Assistant
 
