@@ -1,10 +1,12 @@
 import os
 import re
+import subprocess
+import tempfile
+import json
 from functools import lru_cache
 from typing import Optional
 
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
 from groq import Groq, GroqError
 from dotenv import load_dotenv
 
@@ -44,7 +46,7 @@ def extract_video_id(url: str) -> Optional[str]:
 @lru_cache(maxsize=32)
 def get_transcript(video_id: str, language: str = 'es') -> str:
     """
-    Fetch and cache transcript for a given YouTube video ID in the specified language.
+    Fetch and cache transcript for a given YouTube video ID in the specified language using yt-dlp.
     
     Args:
         video_id: YouTube video ID
@@ -56,95 +58,165 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
     if not video_id:
         return "Error: No video ID provided"
     
-    # Try different methods to get the transcript
-    methods = [
-        _get_transcript_direct,  # Try direct API first
-        _get_transcript_with_retry,  # Then try with retries
-    ]
-    
-    for method in methods:
-        try:
-            result = method(video_id, language)
-            if result and not result.startswith("Error:"):
-                return result
-        except Exception as e:
-            continue
-    
-    return "Error: Could not retrieve transcript after multiple attempts"
-
-def _get_transcript_direct(video_id: str, language: str) -> str:
-    """Try to get transcript using YouTubeTranscriptApi directly"""
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Try to get transcript in the specified language
-        try:
-            transcript = transcript_list.find_transcript([language])
-        except NoTranscriptFound:
-            # If specified language not found, try to get any available transcript and translate
-            try:
-                transcript = transcript_list.find_transcript(['en'])  # Try English as fallback
-                transcript = transcript.translate(language).fetch()
-            except Exception:
-                # If no English, get the first available transcript
-                transcript = next(iter(transcript_list), None)
-                if transcript:
-                    transcript = transcript.translate(language).fetch()
-                else:
-                    return "Error: No transcript available for this video"
-        
-        # If we have a transcript object, fetch its contents
-        if hasattr(transcript, 'fetch'):
-            transcript = transcript.fetch()
-            
-        # Join all text entries with spaces
-        return " ".join(entry['text'] for entry in transcript)
-        
-    except VideoUnavailable:
-        return "Error: This video is not available or is private"
-    except TranscriptsDisabled:
-        return "Error: Transcripts are disabled for this video"
-    except NoTranscriptFound:
-        return "Error: No transcript available for this video"
+        return _get_transcript_yt_dlp(video_id, language)
     except Exception as e:
-        raise Exception(f"Direct method failed: {str(e)}")
+        return f"Error: Could not retrieve transcript - {str(e)}"
 
-def _get_transcript_with_retry(video_id: str, language: str, max_retries: int = 3) -> str:
-    """Try to get transcript with retries and different approaches"""
-    import time
-    from pytube import YouTube
+def _get_transcript_yt_dlp(video_id: str, language: str) -> str:
+    """
+    Get transcript using yt-dlp which is more reliable than youtube-transcript-api.
     
-    for attempt in range(max_retries):
-        try:
-            # Try direct method first
-            if attempt == 0:
-                return _get_transcript_direct(video_id, language)
-                
-            # Try with pytube as fallback
-            yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
-            captions = yt.captions
+    Args:
+        video_id: YouTube video ID
+        language: Desired language code ('es' for Spanish, 'en' for English)
+        
+    Returns:
+        str: The transcript text
+    """
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Set up the yt-dlp command
+        output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
+        
+        # Language mapping for yt-dlp
+        lang_map = {
+            'es': 'es',
+            'en': 'en'
+        }
+        target_lang = lang_map.get(language, 'en')
+        
+        # Try automatic subtitles first, then manual subtitles
+        for sub_type in ['--write-auto-sub', '--write-sub']:
+            command = [
+                "yt-dlp",
+                sub_type,
+                "--skip-download",
+                "--sub-lang", target_lang,
+                "--output", output_template,
+                "--no-warnings",
+                video_url
+            ]
             
-            # Try to get the caption in the requested language
-            caption = captions.get_by_language_code(language[:2])  # Try first 2 chars of language code
-            
-            # If not found, try English
-            if not caption and language != 'en':
-                caption = captions.get_by_language_code('en')
+            try:
+                # Run yt-dlp command
+                result = subprocess.run(
+                    command, 
+                    capture_output=True, 
+                    text=True, 
+                    check=False,
+                    cwd=temp_dir
+                )
                 
-            if caption:
-                return caption.generate_srt_captions()
+                # Find subtitle files
+                subtitle_files = []
+                for file in os.listdir(temp_dir):
+                    if file.endswith(f'.{target_lang}.vtt') or file.endswith(f'.{target_lang}.srt'):
+                        subtitle_files.append(os.path.join(temp_dir, file))
                 
-            # If no captions found, try to get the first available caption
-            if captions:
-                return next(iter(captions)).generate_srt_captions()
+                if subtitle_files:
+                    # Read the first subtitle file found
+                    with open(subtitle_files[0], 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Parse VTT or SRT content to extract text
+                    transcript_text = _parse_subtitle_content(content)
+                    if transcript_text.strip():
+                        return transcript_text
+                        
+            except Exception as e:
+                print(f"yt-dlp attempt failed: {e}")
+                continue
+        
+        # If preferred language fails, try English as fallback
+        if target_lang != 'en':
+            for sub_type in ['--write-auto-sub', '--write-sub']:
+                command = [
+                    "yt-dlp",
+                    sub_type,
+                    "--skip-download",
+                    "--sub-lang", "en",
+                    "--output", output_template,
+                    "--no-warnings",
+                    video_url
+                ]
                 
-        except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
-                raise Exception(f"All retry attempts failed: {str(e)}")
-            time.sleep(1)  # Wait before retrying
+                try:
+                    result = subprocess.run(
+                        command, 
+                        capture_output=True, 
+                        text=True, 
+                        check=False,
+                        cwd=temp_dir
+                    )
+                    
+                    # Find English subtitle files
+                    subtitle_files = []
+                    for file in os.listdir(temp_dir):
+                        if file.endswith('.en.vtt') or file.endswith('.en.srt'):
+                            subtitle_files.append(os.path.join(temp_dir, file))
+                    
+                    if subtitle_files:
+                        with open(subtitle_files[0], 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        
+                        transcript_text = _parse_subtitle_content(content)
+                        if transcript_text.strip():
+                            return transcript_text
+                            
+                except Exception as e:
+                    print(f"English fallback failed: {e}")
+                    continue
+    
+    raise Exception("No transcript available for this video")
+
+def _parse_subtitle_content(content: str) -> str:
+    """
+    Parse VTT or SRT subtitle content to extract clean text.
+    
+    Args:
+        content: Raw subtitle file content
+        
+    Returns:
+        str: Clean transcript text
+    """
+    lines = content.split('\n')
+    text_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Skip empty lines
+        if not line:
             continue
+            
+        # Skip VTT header
+        if line.startswith('WEBVTT'):
+            continue
+            
+        # Skip timestamp lines (contain --> )
+        if '-->' in line:
+            continue
+            
+        # Skip sequence numbers (SRT format)
+        if line.isdigit():
+            continue
+            
+        # Skip lines with only timestamps or cue settings
+        if re.match(r'^[\d:.,\s\-<>]+$', line):
+            continue
+            
+        # Clean HTML tags and formatting
+        line = re.sub(r'<[^>]+>', '', line)  # Remove HTML tags
+        line = re.sub(r'\{[^}]+\}', '', line)  # Remove formatting codes
+        line = re.sub(r'\[[^\]]+\]', '', line)  # Remove speaker labels
+        
+        # Add non-empty lines
+        if line:
+            text_lines.append(line)
     
-    return "Error: Could not retrieve transcript with any method"
+    return ' '.join(text_lines)
 
 def clean_latex(text):
     """Remove LaTeX formatting from text"""

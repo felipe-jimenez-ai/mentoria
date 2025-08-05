@@ -1,8 +1,6 @@
-youtube-transcript-api>=0.6.1
+yt-dlp>=2023.1.6
 groq>=0.3.0
 python-dotenv>=1.0.0
 streamlit>=1.28.0
 requests>=2.31.0
-youtube-dl>=2021.12.17
-pytube>=12.1.0
 urllib3>=1.26.0
