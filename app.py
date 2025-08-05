@@ -3,6 +3,8 @@ import re
 import subprocess
 import tempfile
 import json
+import time
+import random
 from functools import lru_cache
 from typing import Optional
 
@@ -63,111 +65,161 @@ def get_transcript(video_id: str, language: str = 'es') -> str:
     except Exception as e:
         return f"Error: Could not retrieve transcript - {str(e)}"
 
-def _get_transcript_yt_dlp(video_id: str, language: str) -> str:
+def _get_transcript_yt_dlp(video_id: str, language: str, max_retries: int = 3) -> str:
     """
-    Get transcript using yt-dlp which is more reliable than youtube-transcript-api.
+    Get transcript using yt-dlp with rate limiting and retry logic.
     
     Args:
         video_id: YouTube video ID
         language: Desired language code ('es' for Spanish, 'en' for English)
+        max_retries: Maximum number of retry attempts
         
     Returns:
         str: The transcript text
     """
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Set up the yt-dlp command
-        output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
-        
-        # Language mapping for yt-dlp
-        lang_map = {
-            'es': 'es',
-            'en': 'en'
-        }
-        target_lang = lang_map.get(language, 'en')
-        
-        # Try automatic subtitles first, then manual subtitles
-        for sub_type in ['--write-auto-sub', '--write-sub']:
-            command = [
-                "yt-dlp",
-                sub_type,
-                "--skip-download",
-                "--sub-lang", target_lang,
-                "--output", output_template,
-                "--no-warnings",
-                video_url
-            ]
+    for attempt in range(max_retries):
+        try:
+            # Add exponential backoff delay between attempts
+            if attempt > 0:
+                delay = (2 ** attempt) + random.uniform(0, 1)  # 2, 4, 8 seconds + jitter
+                st.info(f"Rate limited. Waiting {delay:.1f} seconds before retry {attempt + 1}/{max_retries}...")
+                time.sleep(delay)
             
-            try:
-                # Run yt-dlp command
-                result = subprocess.run(
-                    command, 
-                    capture_output=True, 
-                    text=True, 
-                    check=False,
-                    cwd=temp_dir
-                )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Set up the yt-dlp command
+                output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
                 
-                # Find subtitle files
-                subtitle_files = []
-                for file in os.listdir(temp_dir):
-                    if file.endswith(f'.{target_lang}.vtt') or file.endswith(f'.{target_lang}.srt'):
-                        subtitle_files.append(os.path.join(temp_dir, file))
+                # Language mapping for yt-dlp
+                lang_map = {
+                    'es': 'es',
+                    'en': 'en'
+                }
+                target_lang = lang_map.get(language, 'en')
                 
-                if subtitle_files:
-                    # Read the first subtitle file found
-                    with open(subtitle_files[0], 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    # Parse VTT or SRT content to extract text
-                    transcript_text = _parse_subtitle_content(content)
-                    if transcript_text.strip():
-                        return transcript_text
-                        
-            except Exception as e:
-                print(f"yt-dlp attempt failed: {e}")
-                continue
-        
-        # If preferred language fails, try English as fallback
-        if target_lang != 'en':
-            for sub_type in ['--write-auto-sub', '--write-sub']:
-                command = [
+                # Add rate limiting to yt-dlp command
+                base_command = [
                     "yt-dlp",
-                    sub_type,
-                    "--skip-download",
-                    "--sub-lang", "en",
-                    "--output", output_template,
-                    "--no-warnings",
-                    video_url
+                    "--sleep-interval", "1",  # Sleep 1 second between requests
+                    "--max-sleep-interval", "3",  # Maximum sleep time
+                    "--no-warnings"
                 ]
                 
-                try:
-                    result = subprocess.run(
-                        command, 
-                        capture_output=True, 
-                        text=True, 
-                        check=False,
-                        cwd=temp_dir
-                    )
+                # Try automatic subtitles first, then manual subtitles
+                for sub_type in ['--write-auto-sub', '--write-sub']:
+                    command = base_command + [
+                        sub_type,
+                        "--skip-download",
+                        "--sub-lang", target_lang,
+                        "--output", output_template,
+                        video_url
+                    ]
                     
-                    # Find English subtitle files
-                    subtitle_files = []
-                    for file in os.listdir(temp_dir):
-                        if file.endswith('.en.vtt') or file.endswith('.en.srt'):
-                            subtitle_files.append(os.path.join(temp_dir, file))
-                    
-                    if subtitle_files:
-                        with open(subtitle_files[0], 'r', encoding='utf-8') as f:
-                            content = f.read()
+                    try:
+                        # Run yt-dlp command
+                        result = subprocess.run(
+                            command, 
+                            capture_output=True, 
+                            text=True, 
+                            check=False,
+                            cwd=temp_dir,
+                            timeout=60  # 60 second timeout
+                        )
                         
-                        transcript_text = _parse_subtitle_content(content)
-                        if transcript_text.strip():
-                            return transcript_text
+                        # Check for rate limiting in stderr
+                        if result.stderr and "429" in result.stderr:
+                            raise Exception("Rate limited by YouTube (429)")
+                        
+                        # Find subtitle files
+                        subtitle_files = []
+                        for file in os.listdir(temp_dir):
+                            if file.endswith(f'.{target_lang}.vtt') or file.endswith(f'.{target_lang}.srt'):
+                                subtitle_files.append(os.path.join(temp_dir, file))
+                        
+                        if subtitle_files:
+                            # Read the first subtitle file found
+                            with open(subtitle_files[0], 'r', encoding='utf-8') as f:
+                                content = f.read()
                             
-                except Exception as e:
-                    print(f"English fallback failed: {e}")
-                    continue
+                            # Parse VTT or SRT content to extract text
+                            transcript_text = _parse_subtitle_content(content)
+                            if transcript_text.strip():
+                                return transcript_text
+                                
+                    except subprocess.TimeoutExpired:
+                        print(f"yt-dlp timeout for {sub_type}")
+                        continue
+                    except Exception as e:
+                        if "429" in str(e):
+                            raise  # Re-raise 429 errors to trigger retry
+                        print(f"yt-dlp attempt ({sub_type}) failed: {e}")
+                        continue
+                
+                # If preferred language fails, try English as fallback
+                if target_lang != 'en':
+                    for sub_type in ['--write-auto-sub', '--write-sub']:
+                        command = base_command + [
+                            sub_type,
+                            "--skip-download",
+                            "--sub-lang", "en",
+                            "--output", output_template,
+                            video_url
+                        ]
+                        
+                        try:
+                            result = subprocess.run(
+                                command, 
+                                capture_output=True, 
+                                text=True, 
+                                check=False,
+                                cwd=temp_dir,
+                                timeout=60
+                            )
+                            
+                            # Check for rate limiting
+                            if result.stderr and "429" in result.stderr:
+                                raise Exception("Rate limited by YouTube (429)")
+                            
+                            # Find English subtitle files
+                            subtitle_files = []
+                            for file in os.listdir(temp_dir):
+                                if file.endswith('.en.vtt') or file.endswith('.en.srt'):
+                                    subtitle_files.append(os.path.join(temp_dir, file))
+                            
+                            if subtitle_files:
+                                with open(subtitle_files[0], 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                
+                                transcript_text = _parse_subtitle_content(content)
+                                if transcript_text.strip():
+                                    return transcript_text
+                                    
+                        except subprocess.TimeoutExpired:
+                            print(f"yt-dlp timeout for English {sub_type}")
+                            continue
+                        except Exception as e:
+                            if "429" in str(e):
+                                raise  # Re-raise 429 errors to trigger retry
+                            print(f"English fallback ({sub_type}) failed: {e}")
+                            continue
+                
+                # If we get here without finding transcripts, it's not a rate limit issue
+                raise Exception("No transcript available for this video")
+                
+        except Exception as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                # Rate limited, try again
+                continue
+            elif attempt == max_retries - 1:
+                # Last attempt failed
+                if "429" in str(e):
+                    raise Exception("YouTube rate limit exceeded. Please try again in a few minutes.")
+                else:
+                    raise Exception(str(e))
+            else:
+                # Non-rate-limit error on non-final attempt
+                raise Exception(str(e))
     
     raise Exception("No transcript available for this video")
 
