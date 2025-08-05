@@ -225,8 +225,8 @@ def clean_latex(text):
     # Remove common LaTeX commands
     latex_commands = [
         '\n', '\t', '\r', '\f', '\v',
-        '\textbf', '\textit', '\emph', '\text',
-        '\begin', '\end', '\[', '\]', '\left', '\right'
+        r'\textbf', r'\textit', r'\emph', r'\text',
+        r'\begin', r'\end', r'\[', r'\]', r'\left', r'\right'
     ]
     for cmd in latex_commands:
         text = text.replace(cmd, '')
@@ -254,7 +254,7 @@ def format_qa(text, language='en'):
         return format_spanish_qa(text)
     
     # Handle the specific format with Q1: Question X: ... A: Answer: ...
-    if language == 'en' and re.search(r'Q\d+:', text) and 'Question \d+:' in text and 'A: Answer:' in text:
+    if language == 'en' and re.search(r'Q\d+:', text) and r'Question \d+:' in text and 'A: Answer:' in text:
         # Extract all Q&A pairs
         qa_pairs = re.findall(r'(Q\d+:.*?)(?=Q\d+:|$)', text, re.DOTALL)
         formatted = []
@@ -264,7 +264,7 @@ def format_qa(text, language='en'):
             qa = re.sub(r'Question \d+:', '', qa)  # Remove duplicate question number
             if 'A: Answer:' in qa:
                 q, a = qa.split('A: Answer:', 1)
-                q = q.replace('Q\d+:', '').strip()
+                q = re.sub(r'Q\d+:', '', q).strip()
                 q = re.sub(r'^[:\.\s]+', '', q).strip()
                 if not q.endswith('?'):
                     q = q.rstrip('.:') + '?'
