@@ -1,7 +1,9 @@
-# **🧙‍♂️ MentorIA [(Webapp)](https://mentoria-edu.streamlit.app/)**
+# **🧙‍♂️ MentorIA [(Webapp)](https://mentoria-edu.streamlit.app/) | [(Video Demo)](https://www.youtube.com/watch?v=TUeoTym4jAM)**
 _Accelerate your learning efficiency!_
 _Mentoria is just getting started — powerful tools are on the way. Stay tuned!_
 V1.0.0
+
+https://github.com/user-attachments/assets/14694b99-7fe9-44ef-a1bf-9cd89a7a8d77
 
 ## YouTube Study Assistant
 
